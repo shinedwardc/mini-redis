@@ -3,9 +3,6 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstdio>
-#include <print>
-#include <string>
-#include <cstdlib>
 
 int main() {
     printf("Hello!\n");
@@ -50,7 +47,7 @@ int main() {
     }
 
     epoll_event ev; 
-    ev.events = EPOLLIN; // "Signal file descriptor is ready for a read operation"
+    ev.events = EPOLLIN; // "Tell me when this has data to read (fd)"
     ev.data.fd = server_fd;
 
     int ectl = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev); // Control interface for an epoll fd
@@ -69,12 +66,11 @@ int main() {
         for (int i = 0; i < ready_fd; i++) {
             int fd = events[i].data.fd;
             if (fd == server_fd) {
-                // Someone new is connecting
+                // server_fd is ready: a new client is connecting
                 socklen_t client_len = sizeof(client_addr);
                 int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
                 if (client_fd < 0) {
                     perror("Client connection failed");
-                    close(client_fd);
                     continue;
                 }
                 printf("New client: fd %d\n", client_fd);
@@ -91,7 +87,22 @@ int main() {
                 // client_fd is now on the watch list
             }
             else {
+                // client_fd is ready: client sends bytes
+                int client_fd = events[i].data.fd;
 
+                char buffer[1028];
+
+                ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+
+                if (bytes_read <= 0) {
+                    printf("Client fd %d disconnected\n", client_fd);
+                    close(client_fd);
+                    continue;
+                }
+
+                buffer[bytes_read] = '\0'; // terminator
+                printf("Client fd %d sent: %s\n", client_fd, buffer);
+                write(client_fd, buffer, bytes_read); // echo back
             }
         }
     }
