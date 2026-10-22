@@ -6,7 +6,10 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+
 std::unordered_map<std::string, std::string> store;
+std::unordered_map<std::string, std::unordered_set<std::string>> sets;
 
 std::vector<std::string> parse_command(const std::string& input) {
     //"*1\r\n$4\r\nPING\r\n"
@@ -186,6 +189,70 @@ int main() {
                         else {
                             // Missing key
                             std::string reply = "$-1\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                    }
+                }
+                else if (!args.empty() && args[0] == "SADD") {
+                    if (args.size() <= 2){
+                        std::string reply = "-ERR wrong number of arguments for SADD command\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                    else {
+                        std::string key = args[1];
+                        int added = 0;
+                        for (unsigned int i = 2; i < args.size(); i++) {
+                            if (sets[key].insert(args[i]).second) {
+                                // Check if newly added
+                                added++;
+                            }
+                        }
+                        std::string reply = ":" + std::to_string(added) + "\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                }
+                else if (!args.empty() && args[0] == "SREM") {
+                    if (args.size() <= 2) {
+                        std::string reply = "-ERR wrong number of arguments for SREM command\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                    else {
+                        std::string key = args[1];
+                        std::unordered_map<std::string, std::unordered_set<std::string>>::iterator it = sets.find(key);
+                        if (it == sets.end()) {
+                            std::string reply = ":0\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            int removed = 0;
+                            for (unsigned int i = 2; i < args.size(); i++) {
+                                removed += it->second.erase(args[i]);
+                                if (it->second.empty()) sets.erase(it);
+                            }
+                            std::string reply = ":" + std::to_string(removed) + "\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                    }
+                }
+                else if (!args.empty() && args[0] == "SMEMBERS") {
+                    if (args.size() != 2) {
+                        std::string reply = "-ERR wrong number of arguments for SMEMBERS: should be SMEMBERS <key>\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                    else {
+                        std::string key = args[1];
+                        std::unordered_map<std::string, std::unordered_set<std::string>>::iterator it = sets.find(key);
+                        if (it == sets.end()) {
+                            // Key doesn't exist to list members, send empty array
+                            std::string reply = "*0\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            int members = it->second.size();
+                            std::string reply = "*" + std::to_string(members) + "\r\n";
+                            for (const auto& member : it->second) {
+                                reply += "$" + std::to_string(member.size()) + "\r\n" + member + "\r\n";
+                            }
                             write(client_fd, reply.c_str(), reply.size());
                         }
                     }
