@@ -11,34 +11,30 @@
 std::unordered_map<std::string, std::string> store;
 std::unordered_map<std::string, std::unordered_set<std::string>> sets;
 
-std::vector<std::string> parse_command(const std::string& input) {
+std::vector<std::string> parse_command(const std::string& input, size_t& pos) {
     //"*1\r\n$4\r\nPING\r\n"
     std::vector<std::string> args;
-    long unsigned int pos = 0;
+    if (pos >= input.size() || input[pos] != '*'){
+        pos = input.size(); // not Redis format: skip the rest of the buffer
+        return args; // empty args
+    }
     int count = 0;
-    while (pos < input.size()) {
-        if (input[pos] == '*'){
+    pos++;
+    while (input[pos] != '\r'){
+        count = count * 10 + (input[pos] - '0');
+        pos++;
+    }
+    pos += 2;
+    for (int i = 0; i < count; i++) {
+        pos++;
+        int len = 0;
+        while (input[pos] != '\r'){
+            len = len * 10 + (input[pos] - '0');
             pos++;
-            while (input[pos] != '\r'){
-                count = count * 10 + (input[pos] - '0');
-                pos++;
-            }
-            pos += 2;
         }
-        else if (input[pos] == '$'){
-            pos++;
-            int len = 0;
-            while (input[pos] != '\r'){
-                len = len * 10 + (input[pos] - '0');
-                pos++;
-            }
-            pos += 2;
-            args.push_back(input.substr(pos,len));
-            pos += len + 2;
-        }
-        else {
-            break;
-        }
+        pos += 2;
+        args.push_back(input.substr(pos,len));
+        pos += len + 2;
     }
     return args;
 }
@@ -140,128 +136,131 @@ int main() {
                 }
 
                 buffer[bytes_read] = '\0'; // terminator
-                printf("Client fd %d sent: %s\n", client_fd, buffer);
+                printf("Client fd %d sent: \r\n%s\r\n", client_fd, buffer);
 
-                std::vector<std::string> args = parse_command(buffer);
+                std::string input(buffer, bytes_read);
+                size_t pos = 0;
+                while (pos < input.size()) {
+                    std::vector<std::string> args = parse_command(input,pos);
 
-                if (!args.empty() && args[0] == "PING") {
-                    write(client_fd, "+PONG\r\n", 7);
-                }
-                else if (!args.empty() && args[0] == "ECHO") {
-                    if (args.size() != 2) {
-                        std::string reply = "-ERR wrong number of arguments for command ECHO: should be ECHO <message>\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
+                    if (!args.empty() && args[0] == "PING") {
+                        write(client_fd, "+PONG\r\n", 7);
                     }
-                    else {
-                        std::string message = args[1];
-                        std::string reply = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
-                    }
-                }
-                else if (!args.empty() && args[0] == "SET") {
-                    if (args.size() != 3) {
-                        std::string reply = "-ERR wrong number of arguments for command SET: should be SET <key> <value>\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
-                    }
-                    else {
-                        std::string key = args[1];
-                        std::string value = args[2];
-                        store[key] = value;
-                        
-                        std::string reply = "+OK\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
-                    }
-                }
-                else if (!args.empty() && args[0] == "GET") {
-                    if (args.size() != 2) {
-                        std::string reply = "-ERR wrong number of arguments for command GET: should be GET <key>\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
-                    }
-                    else {
-                        std::string key = args[1];
-                        std::unordered_map<std::string,std::string>::iterator value_it = store.find(key);
-                        if (value_it != store.end()) {
-                            // Return bulk string reply
-                            std::string value = value_it->second;
-                            std::string reply = "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+                    else if (!args.empty() && args[0] == "ECHO") {
+                        if (args.size() != 2) {
+                            std::string reply = "-ERR wrong number of arguments for command ECHO: should be ECHO <message>\r\n";
                             write(client_fd, reply.c_str(), reply.size());
                         }
                         else {
-                            // Missing key
-                            std::string reply = "$-1\r\n";
+                            std::string message = args[1];
+                            std::string reply = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
                             write(client_fd, reply.c_str(), reply.size());
                         }
                     }
-                }
-                else if (!args.empty() && args[0] == "SADD") {
-                    if (args.size() <= 2){
-                        std::string reply = "-ERR wrong number of arguments for SADD command\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
+                    else if (!args.empty() && args[0] == "SET") {
+                        if (args.size() != 3) {
+                            std::string reply = "-ERR wrong number of arguments for command SET: should be SET <key> <value>\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            std::string key = args[1];
+                            std::string value = args[2];
+                            store[key] = value;
+                            
+                            std::string reply = "+OK\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
                     }
-                    else {
-                        std::string key = args[1];
-                        int added = 0;
-                        for (unsigned int i = 2; i < args.size(); i++) {
-                            if (sets[key].insert(args[i]).second) {
-                                // Check if newly added
-                                added++;
+                    else if (!args.empty() && args[0] == "GET") {
+                        if (args.size() != 2) {
+                            std::string reply = "-ERR wrong number of arguments for command GET: should be GET <key>\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            std::string key = args[1];
+                            std::unordered_map<std::string,std::string>::iterator value_it = store.find(key);
+                            if (value_it != store.end()) {
+                                // Return bulk string reply
+                                std::string value = value_it->second;
+                                std::string reply = "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
+                            else {
+                                // Missing key
+                                std::string reply = "$-1\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
                             }
                         }
-                        std::string reply = ":" + std::to_string(added) + "\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
                     }
-                }
-                else if (!args.empty() && args[0] == "SREM") {
-                    if (args.size() <= 2) {
-                        std::string reply = "-ERR wrong number of arguments for SREM command\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
-                    }
-                    else {
-                        std::string key = args[1];
-                        std::unordered_map<std::string, std::unordered_set<std::string>>::iterator it = sets.find(key);
-                        if (it == sets.end()) {
-                            std::string reply = ":0\r\n";
+                    else if (!args.empty() && args[0] == "SADD") {
+                        if (args.size() <= 2){
+                            std::string reply = "-ERR wrong number of arguments for SADD command\r\n";
                             write(client_fd, reply.c_str(), reply.size());
                         }
                         else {
-                            int removed = 0;
+                            std::string key = args[1];
+                            int added = 0;
                             for (unsigned int i = 2; i < args.size(); i++) {
-                                removed += it->second.erase(args[i]);
-                                if (it->second.empty()) sets.erase(it);
+                                if (sets[key].insert(args[i]).second) {
+                                    // Check if newly added
+                                    added++;
+                                }
                             }
-                            std::string reply = ":" + std::to_string(removed) + "\r\n";
+                            std::string reply = ":" + std::to_string(added) + "\r\n";
                             write(client_fd, reply.c_str(), reply.size());
                         }
                     }
-                }
-                else if (!args.empty() && args[0] == "SMEMBERS") {
-                    if (args.size() != 2) {
-                        std::string reply = "-ERR wrong number of arguments for SMEMBERS: should be SMEMBERS <key>\r\n";
-                        write(client_fd, reply.c_str(), reply.size());
-                    }
-                    else {
-                        std::string key = args[1];
-                        std::unordered_map<std::string, std::unordered_set<std::string>>::iterator it = sets.find(key);
-                        if (it == sets.end()) {
-                            // Key doesn't exist to list members, send empty array
-                            std::string reply = "*0\r\n";
+                    else if (!args.empty() && args[0] == "SREM") {
+                        if (args.size() <= 2) {
+                            std::string reply = "-ERR wrong number of arguments for SREM command\r\n";
                             write(client_fd, reply.c_str(), reply.size());
                         }
                         else {
-                            int members = it->second.size();
-                            std::string reply = "*" + std::to_string(members) + "\r\n";
-                            for (const auto& member : it->second) {
-                                reply += "$" + std::to_string(member.size()) + "\r\n" + member + "\r\n";
+                            std::string key = args[1];
+                            std::unordered_map<std::string, std::unordered_set<std::string>>::iterator it = sets.find(key);
+                            if (it == sets.end()) {
+                                std::string reply = ":0\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
                             }
-                            write(client_fd, reply.c_str(), reply.size());
+                            else {
+                                int removed = 0;
+                                for (unsigned int i = 2; i < args.size(); i++) {
+                                    removed += it->second.erase(args[i]);
+                                    if (it->second.empty()) sets.erase(it);
+                                }
+                                std::string reply = ":" + std::to_string(removed) + "\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
                         }
                     }
+                    else if (!args.empty() && args[0] == "SMEMBERS") {
+                        if (args.size() != 2) {
+                            std::string reply = "-ERR wrong number of arguments for SMEMBERS: should be SMEMBERS <key>\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            std::string key = args[1];
+                            std::unordered_map<std::string, std::unordered_set<std::string>>::iterator it = sets.find(key);
+                            if (it == sets.end()) {
+                                // Key doesn't exist to list members, send empty array
+                                std::string reply = "*0\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
+                            else {
+                                int members = it->second.size();
+                                std::string reply = "*" + std::to_string(members) + "\r\n";
+                                for (const auto& member : it->second) {
+                                    reply += "$" + std::to_string(member.size()) + "\r\n" + member + "\r\n";
+                                }
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
+                        }
+                    }
+                    else {
+                        std::string reply = "-ERR unknown command\r\n";
+                        write(client_fd, reply.c_str(), reply.size());                    
+                    }
                 }
-                else {
-                    std::string reply = "-ERR unknown command\r\n";
-                    write(client_fd, reply.c_str(), reply.size());                    
-                }
-                
             }
         }
     }
