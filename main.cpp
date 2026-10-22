@@ -3,6 +3,42 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstdio>
+#include <vector>
+#include <string>
+#include <unordered_map>
+std::unordered_map<std::string, std::string> store;
+
+std::vector<std::string> parse_command(const std::string& input) {
+    //"*1\r\n$4\r\nPING\r\n"
+    std::vector<std::string> args;
+    long unsigned int pos = 0;
+    int count = 0;
+    while (pos < input.size()) {
+        if (input[pos] == '*'){
+            pos++;
+            while (input[pos] != '\r'){
+                count = count * 10 + (input[pos] - '0');
+                pos++;
+            }
+            pos += 2;
+        }
+        else if (input[pos] == '$'){
+            pos++;
+            int len = 0;
+            while (input[pos] != '\r'){
+                len = len * 10 + (input[pos] - '0');
+                pos++;
+            }
+            pos += 2;
+            args.push_back(input.substr(pos,len));
+            pos += len + 2;
+        }
+        else {
+            break;
+        }
+    }
+    return args;
+}
 
 int main() {
     printf("Hello!\n");
@@ -102,7 +138,63 @@ int main() {
 
                 buffer[bytes_read] = '\0'; // terminator
                 printf("Client fd %d sent: %s\n", client_fd, buffer);
-                write(client_fd, buffer, bytes_read); // echo back
+
+                std::vector<std::string> args = parse_command(buffer);
+
+                if (!args.empty() && args[0] == "PING") {
+                    write(client_fd, "+PONG\r\n", 7);
+                }
+                else if (!args.empty() && args[0] == "ECHO") {
+                    if (args.size() != 2) {
+                        std::string reply = "-ERR wrong number of arguments for command ECHO: should be ECHO <message>\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                    else {
+                        std::string message = args[1];
+                        std::string reply = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                }
+                else if (!args.empty() && args[0] == "SET") {
+                    if (args.size() != 3) {
+                        std::string reply = "-ERR wrong number of arguments for command SET: should be SET <key> <value>\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                    else {
+                        std::string key = args[1];
+                        std::string value = args[2];
+                        store[key] = value;
+                        
+                        std::string reply = "+OK\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                }
+                else if (!args.empty() && args[0] == "GET") {
+                    if (args.size() != 2) {
+                        std::string reply = "-ERR wrong number of arguments for command GET: should be GET <key>\r\n";
+                        write(client_fd, reply.c_str(), reply.size());
+                    }
+                    else {
+                        std::string key = args[1];
+                        std::unordered_map<std::string,std::string>::iterator value_it = store.find(key);
+                        if (value_it != store.end()) {
+                            // Return bulk string reply
+                            std::string value = value_it->second;
+                            std::string reply = "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            // Missing key
+                            std::string reply = "$-1\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                    }
+                }
+                else {
+                    std::string reply = "-ERR unknown command\r\n";
+                    write(client_fd, reply.c_str(), reply.size());                    
+                }
+                
             }
         }
     }
