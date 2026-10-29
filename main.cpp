@@ -7,10 +7,29 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <chrono>
+#include <cstdlib>
 
-std::unordered_map<std::string, std::string> store;
-std::unordered_map<std::string, std::unordered_set<std::string>> sets;
+std::unordered_map<std::string, std::string> strings; // SET/GET keys, named after the Redis type
+std::unordered_map<std::string, std::unordered_set<std::string>> sets; // Members in each string key
+std::unordered_map<std::string, long long> expires; // key -> time it dies, in now_ms() units
 std::unordered_map<int, std::string> client_buffers; // bytes a client sent that we haven't parsed yet
+
+// Milliseconds on a clock that never jumps (unlike wall time, which NTP can move)
+long long now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Deletes key if its expiry has passed. Lazy expiry: keys only die when someone touches them.
+void expire_if_needed(const std::string& key) {
+    std::unordered_map<std::string, long long>::iterator it = expires.find(key);
+    if (it != expires.end() && it->second <= now_ms()) {
+        strings.erase(key);
+        sets.erase(key);
+        expires.erase(it);
+    }
+}
 
 // Reads the number at pos up to "\r\n" into out (-1 if it isn't a valid number).
 // Returns false if the "\r\n" hasn't arrived yet.
@@ -167,6 +186,8 @@ int main() {
                 size_t pos = 0;
                 std::vector<std::string> args;
                 while (pos < input.size() && parse_command(input, pos, args)) {
+                    // Every key command has its key at args[1], so check expiry once here
+                    if (args.size() >= 2) expire_if_needed(args[1]);
 
                     if (!args.empty() && args[0] == "PING") {
                         write(client_fd, "+PONG\r\n", 7);
@@ -194,8 +215,9 @@ int main() {
                         else {
                             std::string key = args[1];
                             std::string value = args[2];
-                            store[key] = value;
-                            
+                            strings[key] = value;
+                            expires.erase(key); // like Redis, SET clears any old TTL
+
                             std::string reply = "+OK\r\n";
                             write(client_fd, reply.c_str(), reply.size());
                         }
@@ -207,8 +229,8 @@ int main() {
                         }
                         else {
                             std::string key = args[1];
-                            std::unordered_map<std::string,std::string>::iterator value_it = store.find(key);
-                            if (value_it != store.end()) {
+                            std::unordered_map<std::string,std::string>::iterator value_it = strings.find(key);
+                            if (value_it != strings.end()) {
                                 // Return bulk string reply
                                 std::string value = value_it->second;
                                 std::string reply = "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
@@ -255,7 +277,11 @@ int main() {
                                 int removed = 0;
                                 for (unsigned int i = 2; i < args.size(); i++) {
                                     removed += it->second.erase(args[i]);
-                                    if (it->second.empty()) sets.erase(it);
+                                }
+                                // Only after the loop: erasing inside it left `it` dangling for the next member
+                                if (it->second.empty()) {
+                                    sets.erase(it);
+                                    expires.erase(key); // gone keys don't keep a TTL
                                 }
                                 std::string reply = ":" + std::to_string(removed) + "\r\n";
                                 write(client_fd, reply.c_str(), reply.size());
@@ -283,6 +309,48 @@ int main() {
                                 }
                                 write(client_fd, reply.c_str(), reply.size());
                             }
+                        }
+                    }
+                    else if (!args.empty() && args[0] == "EXPIRE") {
+                        if (args.size() != 3) {
+                            std::string reply = "-ERR wrong number of arguments for command EXPIRE: should be EXPIRE <key> <seconds>\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            std::string key = args[1];
+                            char* end;
+                            long long seconds = strtoll(args[2].c_str(), &end, 10);
+                            if (args[2].empty() || *end != '\0') {
+                                std::string reply = "-ERR value is not an integer or out of range\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
+                            else if (strings.count(key) == 0 && sets.count(key) == 0) {
+                                // No such key: nothing to expire
+                                std::string reply = ":0\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
+                            else {
+                                // 0 or negative seconds: dies on the next access, same result as Redis
+                                expires[key] = now_ms() + seconds * 1000;
+                                std::string reply = ":1\r\n";
+                                write(client_fd, reply.c_str(), reply.size());
+                            }
+                        }
+                    }
+                    else if (!args.empty() && args[0] == "TTL") {
+                        if (args.size() != 2) {
+                            std::string reply = "-ERR wrong number of arguments for command TTL: should be TTL <key>\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
+                        }
+                        else {
+                            std::string key = args[1];
+                            long long ttl;
+                            std::unordered_map<std::string, long long>::iterator it = expires.find(key);
+                            if (strings.count(key) == 0 && sets.count(key) == 0) ttl = -2; // key doesn't exist
+                            else if (it == expires.end()) ttl = -1; // exists, never expires
+                            else ttl = (it->second - now_ms() + 500) / 1000; // seconds left, rounded
+                            std::string reply = ":" + std::to_string(ttl) + "\r\n";
+                            write(client_fd, reply.c_str(), reply.size());
                         }
                     }
                     else {
