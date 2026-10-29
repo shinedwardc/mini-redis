@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <chrono>
 #include <cstdlib>
+#include <csignal>
 
 std::unordered_map<std::string, std::string> strings; // SET/GET keys, named after the Redis type
 std::unordered_map<std::string, std::unordered_set<std::string>> sets; // Members in each string key
@@ -81,6 +82,12 @@ bool parse_command(const std::string& input, size_t& pos, std::vector<std::strin
 }
 
 int main() {
+    // Writing to a client that already hung up raises SIGPIPE, which kills the process by default.
+    // Ignore it so write() just returns an error and the disconnect is handled by the read path.
+    signal(SIGPIPE, SIG_IGN);
+    // Line-buffer stdout so logs show up in `docker logs` (stdout is a pipe there, not a terminal)
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     printf("Hello!\n");
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
