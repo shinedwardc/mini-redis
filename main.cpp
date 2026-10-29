@@ -10,33 +10,55 @@
 
 std::unordered_map<std::string, std::string> store;
 std::unordered_map<std::string, std::unordered_set<std::string>> sets;
+std::unordered_map<int, std::string> client_buffers; // bytes a client sent that we haven't parsed yet
 
-std::vector<std::string> parse_command(const std::string& input, size_t& pos) {
-    //"*1\r\n$4\r\nPING\r\n"
-    std::vector<std::string> args;
-    if (pos >= input.size() || input[pos] != '*'){
-        pos = input.size(); // not Redis format: skip the rest of the buffer
-        return args; // empty args
-    }
-    int count = 0;
-    pos++;
-    while (input[pos] != '\r'){
-        count = count * 10 + (input[pos] - '0');
-        pos++;
-    }
-    pos += 2;
-    for (int i = 0; i < count; i++) {
-        pos++;
-        int len = 0;
-        while (input[pos] != '\r'){
-            len = len * 10 + (input[pos] - '0');
-            pos++;
+// Reads the number at pos up to "\r\n" into out (-1 if it isn't a valid number).
+// Returns false if the "\r\n" hasn't arrived yet.
+bool read_number(const std::string& input, size_t& pos, int& out) {
+    size_t end = input.find("\r\n", pos);
+    if (end == std::string::npos) return false;
+    out = 0;
+    for (size_t i = pos; i < end; i++) {
+        if (input[i] < '0' || input[i] > '9') {
+            out = -1;
+            break;
         }
-        pos += 2;
-        args.push_back(input.substr(pos,len));
-        pos += len + 2;
+        out = out * 10 + (input[i] - '0');
     }
-    return args;
+    pos = end + 2;
+    return true;
+}
+
+// Parses one command starting at pos into args and moves pos past it.
+// Returns false (leaving pos untouched) if the whole command hasn't arrived yet.
+bool parse_command(const std::string& input, size_t& pos, std::vector<std::string>& args) {
+    //"*1\r\n$4\r\nPING\r\n"
+    args.clear();
+    if (input[pos] != '*'){
+        pos = input.size(); // not Redis format: skip the rest of the buffer
+        return true; // empty args
+    }
+    size_t p = pos + 1; // only commit to pos once the full command is here
+    int count = 0;
+    if (!read_number(input, p, count)) return false;
+    for (int i = 0; i < count; i++) {
+        if (p >= input.size()) return false;
+        if (input[p] != '$') break; // malformed
+        p++;
+        int len = 0;
+        if (!read_number(input, p, len)) return false;
+        if (len < 0) break; // malformed
+        if (p + len + 2 > input.size()) return false; // string body not here yet
+        args.push_back(input.substr(p, len));
+        p += len + 2;
+    }
+    if (count < 0 || (int)args.size() != count) {
+        args.clear();
+        pos = input.size(); // malformed: skip the rest of the buffer
+        return true;
+    }
+    pos = p;
+    return true;
 }
 
 int main() {
@@ -131,6 +153,7 @@ int main() {
 
                 if (bytes_read <= 0) {
                     printf("Client fd %d disconnected\n", client_fd);
+                    client_buffers.erase(client_fd);
                     close(client_fd);
                     continue;
                 }
@@ -138,13 +161,19 @@ int main() {
                 buffer[bytes_read] = '\0'; // terminator
                 printf("Client fd %d sent: \r\n%s\r\n", client_fd, buffer);
 
-                std::string input(buffer, bytes_read);
+                // A command can arrive split across reads, so keep leftovers per client
+                std::string& input = client_buffers[client_fd];
+                input.append(buffer, bytes_read);
                 size_t pos = 0;
-                while (pos < input.size()) {
-                    std::vector<std::string> args = parse_command(input,pos);
+                std::vector<std::string> args;
+                while (pos < input.size() && parse_command(input, pos, args)) {
 
                     if (!args.empty() && args[0] == "PING") {
                         write(client_fd, "+PONG\r\n", 7);
+                    }
+                    else if (!args.empty() && args[0] == "QUIT") {
+                        // Client closes the socket after this reply, which hits our disconnect path
+                        write(client_fd, "+OK\r\n", 5);
                     }
                     else if (!args.empty() && args[0] == "ECHO") {
                         if (args.size() != 2) {
@@ -258,9 +287,10 @@ int main() {
                     }
                     else {
                         std::string reply = "-ERR unknown command\r\n";
-                        write(client_fd, reply.c_str(), reply.size());                    
+                        write(client_fd, reply.c_str(), reply.size());
                     }
                 }
+                input.erase(0, pos); // drop what we handled, keep any partial command
             }
         }
     }
